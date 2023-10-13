@@ -79,6 +79,8 @@ class Edge(Generic[TN]):
         self.cost: _Number = 1
         self.enabled: bool = True
 
+        self.__hash = None
+
         self.add_to_nodes()
 
     def add_to_nodes(self):
@@ -111,7 +113,12 @@ class Edge(Generic[TN]):
         return self._src_node == other._src_node and self._dst_node == other._dst_node
 
     def __str__(self):
-        return f'{self._src_node}-->{self._dst_node}'
+        return f'{self.src_node}-->{self.dst_node}'
+
+    def __hash__(self):
+        if self.__hash is None:
+            self.__hash = hash((self.src_node, self.dst_node))
+        return self.__hash
 
 
 class Topology(RseCollection, Generic[TN, TE]):
@@ -145,6 +152,10 @@ class Topology(RseCollection, Generic[TN, TE]):
                     # A new node added. Edges which were already loaded are probably incomplete now.
                     self._edges_loaded = False
         return rse_data
+
+    @property
+    def edges(self):
+        return self._edges
 
     def edge(self, src_node: TN, dst_node: TN) -> "Optional[TE]":
         return self._edges.get((src_node, dst_node))
