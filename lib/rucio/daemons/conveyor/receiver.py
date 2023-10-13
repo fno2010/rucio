@@ -48,11 +48,12 @@ DAEMON_NAME = 'conveyor-receiver'
 
 class Receiver(object):
 
-    def __init__(self, broker, id_, total_threads, all_vos=False):
+    def __init__(self, broker, id_, total_threads, transfer_stats_manager: transfer_core.TransferStatsManager, all_vos=False):
         self.__all_vos = all_vos
         self.__broker = broker
         self.__id = id_
         self.__total_threads = total_threads
+        self._transfer_stats_manager = transfer_stats_manager
 
     @METRICS.count_it
     def on_error(self, frame):
@@ -85,7 +86,12 @@ class Receiver(object):
             if tt_status_report.get_db_fields_to_update(session=session, logger=logger):
                 logging.info('RECEIVED %s', tt_status_report)
 
-                ret = transfer_core.update_transfer_state(tt_status_report, session=session, logger=logger)
+                ret = transfer_core.update_transfer_state(
+                    tt_status_report=tt_status_report,
+                    stats_manager=self._transfer_stats_manager,
+                    session=session,
+                    logger=logger,
+                )
                 METRICS.counter('update_request_state.{updated}').labels(updated=ret).inc()
         except Exception:
             logging.critical(traceback.format_exc())
@@ -147,27 +153,37 @@ def receiver(id_, total_threads=1, all_vos=False):
     logging.info('receiver started')
 
     with HeartbeatHandler(executable=DAEMON_NAME, renewal_interval=30) as heartbeat_handler:
+        transfer_stats_manager = transfer_core.TransferStatsManager()
+        try:
+            while not GRACEFUL_STOP.is_set():
 
-        while not GRACEFUL_STOP.is_set():
+                _, _, logger = heartbeat_handler.live()
 
-            _, _, logger = heartbeat_handler.live()
+                for conn in conns:
 
-            for conn in conns:
+                    if not conn.is_connected():
+                        logger(logging.INFO, 'connecting to %s' % conn.transport._Transport__host_and_ports[0][0])
+                        METRICS.counter('reconnect.{host}').labels(host=conn.transport._Transport__host_and_ports[0][0].split('.')[0]).inc()
 
-                if not conn.is_connected():
-                    logger(logging.INFO, 'connecting to %s' % conn.transport._Transport__host_and_ports[0][0])
-                    METRICS.counter('reconnect.{host}').labels(host=conn.transport._Transport__host_and_ports[0][0].split('.')[0]).inc()
-
-                    conn.set_listener('rucio-messaging-fts3', Receiver(broker=conn.transport._Transport__host_and_ports[0],
-                                                                       id_=id_, total_threads=total_threads, all_vos=all_vos))
-                    if not use_ssl:
-                        conn.connect(username, password, wait=True)
-                    else:
-                        conn.connect(wait=True)
-                    conn.subscribe(destination=config_get('messaging-fts3', 'destination'),
-                                   id='rucio-messaging-fts3',
-                                   ack='auto')
-            time.sleep(1)
+                        conn.set_listener(
+                            'rucio-messaging-fts3',
+                            Receiver(
+                                broker=conn.transport._Transport__host_and_ports[0],
+                                id_=id_,
+                                total_threads=total_threads,
+                                transfer_stats_manager=transfer_stats_manager,
+                                all_vos=all_vos
+                            ))
+                        if not use_ssl:
+                            conn.connect(username, password, wait=True)
+                        else:
+                            conn.connect(wait=True)
+                        conn.subscribe(destination=config_get('messaging-fts3', 'destination'),
+                                       id='rucio-messaging-fts3',
+                                       ack='auto')
+                time.sleep(1)
+        finally:
+            transfer_stats_manager.force_save()
 
         for conn in conns:
             try:
